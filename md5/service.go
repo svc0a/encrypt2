@@ -7,6 +7,7 @@ import (
 
 type Service interface {
 	Encode(string) string
+	private()
 }
 
 func New() Service {
@@ -14,6 +15,10 @@ func New() Service {
 }
 
 type impl struct{}
+
+func (i impl) private() {
+	return
+}
 
 func (i impl) Encode(data string) string {
 	hash := md5.New()                        // 创建一个新的MD5 hash对象
