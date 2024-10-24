@@ -1,98 +1,136 @@
 package rsa
 
 import (
+	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
 	"errors"
 )
 
+// Encoder is responsible for signing messages using an RSA private key.
 type Encoder interface {
-	Encode(string) (string, error)
+	Sign(message string) (string, error)
 	private()
 }
 
+// Decoder is responsible for verifying signatures using an RSA public key.
 type Decoder interface {
-	Decode(string) (string, error)
+	Verify(message, signature string) error
 	private()
 }
 
-func NewEncoder(privateKey string) Encoder {
-	return impl{
-		privateKey: privateKey,
+// NewEncoder initializes an Encoder with the provided PEM-encoded RSA private key.
+func NewEncoder(privateKeyPEM string) (Encoder, error) {
+	privateKey, err := parsePrivateKey(privateKeyPEM)
+	if err != nil {
+		return nil, err
 	}
+	return &encoderImpl{privateKey: privateKey}, nil
 }
 
-func NewDecoder(publicKey string) Decoder {
-	return impl{
-		publicKey: publicKey,
+// NewDecoder initializes a Decoder with the provided PEM-encoded RSA public key.
+func NewDecoder(publicKeyPEM string) (Decoder, error) {
+	publicKey, err := parsePublicKey(publicKeyPEM)
+	if err != nil {
+		return nil, err
 	}
+	return &decoderImpl{publicKey: publicKey}, nil
 }
 
-type impl struct {
-	privateKey string
-	publicKey  string
+// encoderImpl implements the Encoder interface.
+type encoderImpl struct {
+	privateKey *rsa.PrivateKey
 }
 
-func (i impl) Encode(s string) (string, error) {
-	// Decode the private key from PEM format
-	block, _ := pem.Decode([]byte(i.privateKey))
-	if block == nil || block.Type != "RSA PRIVATE KEY" {
-		return "", errors.New("failed to decode private key")
-	}
+func (e *encoderImpl) Sign(message string) (string, error) {
+	// Hash the message using SHA-256.
+	hashed := sha256.Sum256([]byte(message))
 
-	// Parse the RSA private key
-	privateKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	// Sign the hashed message using PKCS1v15.
+	signature, err := rsa.SignPKCS1v15(rand.Reader, e.privateKey, crypto.SHA256, hashed[:])
 	if err != nil {
 		return "", err
 	}
 
-	// Encrypt the message using RSA private key
-	encryptedBytes, err := rsa.SignPKCS1v15(rand.Reader, privateKey, 0, []byte(s))
-	if err != nil {
-		return "", err
-	}
-
-	// Encode the encrypted message as base64 string
-	return base64.StdEncoding.EncodeToString(encryptedBytes), nil
+	// Return the signature encoded in base64.
+	return base64.StdEncoding.EncodeToString(signature), nil
 }
 
-func (i impl) Decode(s string) (string, error) {
-	// Decode the public key from PEM format
-	block, _ := pem.Decode([]byte(i.publicKey))
-	if block == nil || block.Type != "PUBLIC KEY" {
-		return "", errors.New("failed to decode public key")
-	}
+func (e *encoderImpl) private() {}
 
-	// Parse the RSA public key
-	pubKey, err := x509.ParsePKIXPublicKey(block.Bytes)
+// decoderImpl implements the Decoder interface.
+type decoderImpl struct {
+	publicKey *rsa.PublicKey
+}
+
+func (d *decoderImpl) Verify(message, signatureB64 string) error {
+	// Decode the base64-encoded signature.
+	signature, err := base64.StdEncoding.DecodeString(signatureB64)
 	if err != nil {
-		return "", err
+		return err
 	}
 
-	rsaPubKey, ok := pubKey.(*rsa.PublicKey)
+	// Hash the message using SHA-256.
+	hashed := sha256.Sum256([]byte(message))
+
+	// Verify the signature using PKCS1v15.
+	err = rsa.VerifyPKCS1v15(d.publicKey, crypto.SHA256, hashed[:], signature)
+	if err != nil {
+		return errors.New("signature verification failed")
+	}
+
+	return nil
+}
+
+func (d *decoderImpl) private() {}
+
+// parsePrivateKey parses a PEM-encoded RSA private key.
+func parsePrivateKey(pemStr string) (*rsa.PrivateKey, error) {
+	block, _ := pem.Decode([]byte(pemStr))
+	if block == nil {
+		return nil, errors.New("invalid PEM block for private key")
+	}
+	if block.Type != "RSA PRIVATE KEY" && block.Type != "PRIVATE KEY" {
+		return nil, errors.New("unsupported private key type")
+	}
+
+	var parsedKey interface{}
+	var err error
+	if block.Type == "PRIVATE KEY" {
+		parsedKey, err = x509.ParsePKCS8PrivateKey(block.Bytes)
+	} else {
+		parsedKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	privateKey, ok := parsedKey.(*rsa.PrivateKey)
 	if !ok {
-		return "", errors.New("not an RSA public key")
+		return nil, errors.New("not an RSA private key")
 	}
-
-	// Decode the base64 string into bytes
-	encryptedBytes, err := base64.StdEncoding.DecodeString(s)
-	if err != nil {
-		return "", err
-	}
-
-	// Decrypt the message using RSA public key
-	decryptedBytes, err := rsa.DecryptPKCS1v15(rand.Reader, rsaPubKey, encryptedBytes)
-	if err != nil {
-		return "", err
-	}
-
-	// Return the decrypted message as string
-	return string(decryptedBytes), nil
+	return privateKey, nil
 }
 
-func (i impl) private() {
-	// Private method to satisfy the interface
+// parsePublicKey parses a PEM-encoded RSA public key.
+func parsePublicKey(pemStr string) (*rsa.PublicKey, error) {
+	block, _ := pem.Decode([]byte(pemStr))
+	if block == nil || block.Type != "PUBLIC KEY" {
+		return nil, errors.New("invalid PEM block for public key")
+	}
+
+	pubInterface, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+
+	publicKey, ok := pubInterface.(*rsa.PublicKey)
+	if !ok {
+		return nil, errors.New("not an RSA public key")
+	}
+	return publicKey, nil
 }
